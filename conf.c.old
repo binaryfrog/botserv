@@ -1,0 +1,334 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+#include <errno.h>
+#include <sys/types.h>
+
+#include <glib.h>
+
+#include "conf.h"
+
+/* Maximum length of one line in configuration file */
+#define BUF_SIZE 1024
+
+typedef enum _ConfType ConfType;
+typedef struct _ConfItem ConfItem;
+
+enum _ConfType
+{
+	CONF_TYPE_STRING,
+	CONF_TYPE_INTEGER
+};
+
+struct _ConfItem
+{
+	char *name;
+	ConfType type;
+
+	/* Pointer to variable to store parameter's value.
+	 *
+	 * For CONF_TYPE_STRING should be pointer to char*, value will be
+	 * automatically allocated, but not automatically freed.
+	 *
+	 * For CONF_TYPE_INTEGER should be pointer to int */
+	void *value;
+
+	/* Set to 1 if it is an error to omit this parameter from config */
+	int required:1;
+
+	/* Set to 0. Parser will set to 1 if parameter is successfully read */
+	int set:1;
+};
+
+char *ConfServerName;
+char *ConfServerInfo;
+char *ConfHostName;
+int ConfPort;
+char *ConfSendPass;
+char *ConfRecvPass;
+char *ConfDatabase;
+char *ConfBotUserName;
+char *ConfBotHostName;
+char *ConfBotIP;
+char *ConfBotModes;
+char *ConfBotRealName;
+
+static const char *FileName;
+static int FileLine;
+static int FileErrors;
+
+static ConfItem ConfItems[] =
+{
+	{ "servername", CONF_TYPE_STRING, &ConfServerName, 1, 0 },
+	{ "serverinfo", CONF_TYPE_STRING, &ConfServerInfo, 1, 0 },
+	{ "hostname", CONF_TYPE_STRING, &ConfHostName, 1, 0 },
+	{ "port", CONF_TYPE_INTEGER, &ConfPort, 1, 0 },
+	{ "sendpass", CONF_TYPE_STRING, &ConfSendPass, 1, 0 },
+	{ "recvpass", CONF_TYPE_STRING, &ConfRecvPass, 1, 0 },
+	{ "database", CONF_TYPE_STRING, &ConfDatabase, 1, 0 },
+	{ "botusername", CONF_TYPE_STRING, &ConfBotUserName, 1, 0 },
+	{ "bothostname", CONF_TYPE_STRING, &ConfBotHostName, 1, 0 },
+	{ "botip", CONF_TYPE_STRING, &ConfBotIP, 1, 0 },
+	{ "botmodes", CONF_TYPE_STRING, &ConfBotModes, 1, 0 },
+	{ "botrealname", CONF_TYPE_STRING, &ConfBotRealName, 1, 0 },
+	{  NULL, 0, NULL, 0, 0 }
+};
+
+/* Processes a single line from the configuration file */
+static void conf_parse_line(char *buf);
+
+/* Processes a parameter,value pair from the configuration file */
+static void conf_handle(const char *param, char *value);
+
+/* Processes a CONF_TYPE_STRING value */
+static void conf_parse_string(ConfItem *conf_item, char *value);
+
+/* Processes a CONF_TYPE_INTEGER value */
+static void conf_parse_integer(ConfItem *conf_item, char *value);
+
+/* Removes white space from start and end of S */
+static char *conf_trim(char *s);
+
+/*
+ * Reads configuration from given filename
+ * Returns 0 on success, -1 on error. Aborts on really bad error
+ */
+int conf_read(const char *filename)
+{
+	fprintf(stderr, "Reading configuration from %s\n", filename);
+
+	FILE *fp;
+
+	if((fp = fopen(filename, "r")) == NULL)
+	{
+		g_error("Error opening %s for reading: %s",
+				filename, strerror(errno));
+	}
+
+
+	char buf[BUF_SIZE];
+	FileName = filename;
+	FileLine = FileErrors = 0;
+
+	while(fgets(buf, sizeof(buf), fp) != NULL)
+	{
+		++FileLine;
+
+		if(strlen(buf))
+		{
+			if(buf[strlen(buf) - 1] == '\n')
+				buf[strlen(buf) - 1] = '\0';
+
+			conf_parse_line(buf);
+		}
+	}
+
+	fclose(fp);
+
+	for(int i = 0; ConfItems[i].name; ++i)
+	{
+		if(ConfItems[i].required && !ConfItems[i].set)
+		{
+			fprintf(stderr,"%s: Required parameter missing: %s.\n",
+					FileName, ConfItems[i].name);
+			++FileErrors;
+		}
+	}
+	
+	if(FileErrors > 0)
+	{
+		fprintf(stderr, "%d errors in configuration; not starting.\n",
+				FileErrors);
+		return -1;
+	} else
+	{
+		fprintf(stderr, "Configuration complete.\n");
+	}
+
+	return 0;
+}
+
+/*
+ * Processes a single line from the configuration file
+ */
+static void conf_parse_line(char *buf)
+{
+	char *param, *value;
+
+	while(*buf == ' ' || *buf == '\t')
+		++buf;
+
+	if(!*buf || *buf == '#')
+		return;
+
+	param = value = buf;
+
+	while(*value && *value != '=')
+		++value;
+
+	if(!*value)
+	{
+		fprintf(stderr, "%s:%d: missing '='\n", FileName, FileLine);
+		++FileErrors;
+		return;
+	}
+
+	*value++ = '\0';
+
+	param = conf_trim(param);
+	value = conf_trim(value);
+
+	conf_handle(param, value);
+}
+
+/*
+ * Processes a parameter,value pair from the configuration file
+ */
+static void conf_handle(const char *param, char *value)
+{
+	int i;
+
+	for(i = 0; ConfItems[i].name; ++i)
+	{
+		if(strcasecmp(ConfItems[i].name, param) == 0)
+			break;
+	}
+
+	if(!ConfItems[i].name)
+	{
+		fprintf(stderr, "%s:%d: Unknown parameter: %s\n",
+				FileName, FileLine, param);
+		++FileErrors;
+		return;
+	}
+
+	switch(ConfItems[i].type)
+	{
+		case CONF_TYPE_STRING:
+			conf_parse_string(&ConfItems[i], value);
+			break;
+		case CONF_TYPE_INTEGER:
+			conf_parse_integer(&ConfItems[i], value);
+			break;
+		default:
+			g_assert_not_reached();
+	}
+}
+
+/*
+ * Processes a CONF_TYPE_STRING value
+ */
+static void conf_parse_string(ConfItem *conf_item, char *value)
+{
+	if(*value != '"')
+	{
+		fprintf(stderr, "%s:%d: Missing opening '\"', found '%c'\n",
+				FileName, FileLine, *value);
+		++FileErrors;
+		return;
+	}
+
+	int in_quote = 0, in_slash = 0;
+	for(char *ptr = value; *ptr; ++ptr)
+	{
+		if(in_slash)
+		{
+			memmove(ptr - 1, ptr, strlen(ptr) + 1);
+			in_slash = 0;
+			--ptr;
+		} else if(*ptr == '"')
+		{
+			if(ptr == value && !in_quote)
+			{
+				in_quote = 1;
+				++value;
+			} else if(in_quote && ptr[1] == '\0')
+			{
+				in_quote = 0;
+				*ptr = '\0';
+			} else
+			{
+				fprintf(stderr, "%s:%d: Unexpected character "
+						"data following '\"'\n",
+						FileName, FileLine);
+				++FileErrors;
+				return;
+			}
+		} else if(*ptr == '\\')
+		{
+			in_slash = 1;
+		}
+	}
+
+	if(in_quote)
+	{
+		fprintf(stderr, "%s:%d: Missing closing '\"' (%s)\n",
+				FileName, FileLine, value);
+		++FileErrors;
+		return;
+	}
+
+	if(in_slash)
+	{
+		fprintf(stderr, "%s:%d: Missing character following '\\'\n",
+				FileName, FileLine);
+		++FileErrors;
+		return;
+	}
+
+	char **conf_value = conf_item->value;
+	*conf_value = g_strdup(value);
+	conf_item->set = 1;
+}
+
+/*
+ * Processes a CONF_TYPE_INTEGER value
+ */
+static void conf_parse_integer(ConfItem *conf_item, char *value)
+{
+	char *ptr;
+	int result;
+
+	errno = 0;
+	result = strtol(value, &ptr, 0);
+
+	if(errno != 0)
+	{
+		fprintf(stderr, "%s:%d: Error parsing integer: %s\n",
+				FileName, FileLine, strerror(errno));
+		++FileErrors;
+		return;
+	}
+
+	if(*ptr != '\0')
+	{
+		fprintf(stderr, "%s:%d: Expected digit, found '%c'\n",
+				FileName, FileLine, *ptr);
+		++FileErrors;
+		return;
+	}
+
+	*((int *) (conf_item->value)) = result;
+	conf_item->set = 1;
+}
+
+/*
+ * Removes whitespace from start and end of S
+ */
+static char *conf_trim(char *s)
+{
+	if(!*s) return s;
+
+	while(*s == ' ' || *s == '\t')
+		++s;
+
+	if(!*s) return s;
+
+	char *ptr = s + strlen(s) - 1;
+	while(ptr >= s && (*ptr == ' ' || *ptr == '\t'))
+		*ptr-- = '\0';
+
+	return s;
+}
+
